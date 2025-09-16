@@ -18,30 +18,36 @@ Dataset: BNCI 2014-001 (BCI IV-2a): 9 subjects, 22 channels, 4 classes, 250 Hz.
 Trial window used in these scripts: [2.0s, 6.0s] after cue.
 
 Results
+
 Test accuracy (%) — LOSO supervised
-Sub	Acc
-01	77.08
-02	50.35
-03	81.77
-04	61.11
-05	55.21
-06	59.38
-07	70.49
-08	75.17
-09	73.09
-Avg	 67.07
+| Sub | Acc   |
+| --- | ----- |
+| 01  | 77.08 |
+| 02  | 50.35 |
+| 03  | 81.77 |
+| 04  | 61.11 |
+| 05  | 55.21 |
+| 06  | 59.38 |
+| 07  | 70.49 |
+| 08  | 75.17 |
+| 09  | 73.09 |
+| --- | ----- |
+| Avg | 67.07 |
+	 
 Test accuracy (%) — LOSO supervised + SSL initialization
-Sub	Acc
-01	77.26
-02	49.31
-03	84.38
-04	59.20
-05	56.08
-06	59.03
-07	72.05
-08	80.38
-09	71.35
-Avg	67.67
+| Sub | Acc   |
+| --- | ----- |
+| 01  | 77.26 |
+| 02  | 49.31 |
+| 03  | 84.38 |
+| 04  | 59.20 |
+| 05  | 56.08 |
+| 06  | 59.03 |
+| 07  | 72.05 |
+| 08  | 80.38 |
+| 09  | 71.35 |
+| --- | ----- |
+| Avg | 67.67 |
 
 DATA_ROOT = "../four-class-motor-imagery-bnci-001-2014"
 
