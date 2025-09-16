@@ -70,6 +70,10 @@ def train_step(ssl_model, v1, v2, optimizer, temperature: float):
 def _pack_X(X):  # [N,C,T] -> [N,1,C,T]
     return X[:, None, ...].astype(np.float32, copy=False)
 
+def _to_b1ct(x):
+    # if dataset yields [B, C, T] → make [B, 1, C, T]; if already [B, 1, C, T] → pass through
+    return x if x.shape.rank == 4 else tf.expand_dims(x, 1)
+
 def _probe_now(encoder, X, y, split, k):
     feat_model = tf.keras.Model(encoder.input, encoder.outputs[1], name="feature_tap")
     Z = feat_model(_pack_X(X), training=False).numpy()
@@ -104,8 +108,8 @@ def run_loso(args):
         for ep in range(1, args.epochs + 1):
             losses = []
             for v1, v2 in ds:
-                v1 = tf.expand_dims(v1, 1)
-                v2 = tf.expand_dims(v2, 1)
+                v1 = _to_b1ct(v1)
+                v2 = _to_b1ct(v2)
                 losses.append(train_step(ssl_model, v1, v2, opt, args.temperature))
             if ep % args.log_every == 0:
                 print(f"[LOSO {tgt:02d}] epoch {ep:03d}/{args.epochs}  ssl_loss={float(tf.reduce_mean(losses)): .4f}")
@@ -151,8 +155,8 @@ def run_subject_dependent_one(args, sub: int):
     for ep in range(1, args.epochs + 1):
         losses = []
         for v1, v2 in ds:
-            v1 = tf.expand_dims(v1, 1)
-            v2 = tf.expand_dims(v2, 1)
+            v1 = _to_b1ct(v1)
+            v2 = _to_b1ct(v2)
             losses.append(train_step(ssl_model, v1, v2, opt, args.temperature))
         if ep % args.log_every == 0:
             print(f"[SUBJ {sub:02d}] epoch {ep:03d}/{args.epochs}  ssl_loss={float(tf.reduce_mean(losses)): .4f}")
