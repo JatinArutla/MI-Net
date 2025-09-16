@@ -20,6 +20,11 @@ except Exception:
 tf.config.threading.set_intra_op_parallelism_threads(1)
 tf.config.threading.set_inter_op_parallelism_threads(1)
 
+from sklearn.model_selection import train_test_split
+from sklearn.linear_model import LogisticRegression
+from sklearn.neighbors import KNeighborsClassifier
+from sklearn.metrics import accuracy_score
+
 from src.datamodules.bci2a import load_LOSO_pool, load_subject_dependent
 from src.models.model import build_atcnet
 from src.models.wrappers import build_ssl_projector
@@ -62,6 +67,19 @@ def train_step(ssl_model, v1, v2, optimizer, temperature: float):
     optimizer.apply_gradients(zip(grads, ssl_model.trainable_variables))
     return loss
 
+def _pack_X(X):  # [N,C,T] -> [N,1,C,T]
+    return X[:, None, ...].astype(np.float32, copy=False)
+
+def _probe_now(encoder, X, y, split, k):
+    feat_model = tf.keras.Model(encoder.input, encoder.outputs[1], name="feature_tap")
+    Z = feat_model(_pack_X(X), training=False).numpy()
+    Ztr, Zva, ytr, yva = train_test_split(Z, y, test_size=split, random_state=42, stratify=y)
+    lr = LogisticRegression(max_iter=2000).fit(Ztr, ytr)
+    acc_lr = accuracy_score(yva, lr.predict(Zva))
+    knn = KNeighborsClassifier(n_neighbors=k, weights="distance", n_jobs=-1).fit(Ztr, ytr)
+    acc_knn = accuracy_score(yva, knn.predict(Zva))
+    return acc_lr, acc_knn
+
 def run_loso(args):
     for tgt in range(1, args.n_sub + 1):
         fold_dir = os.path.join(args.results_dir, f"LOSO_{tgt:02d}")
@@ -86,20 +104,32 @@ def run_loso(args):
         for ep in range(1, args.epochs + 1):
             losses = []
             for v1, v2 in ds:
-                # expand to [B,1,C,T]
                 v1 = tf.expand_dims(v1, 1)
                 v2 = tf.expand_dims(v2, 1)
                 losses.append(train_step(ssl_model, v1, v2, opt, args.temperature))
             if ep % args.log_every == 0:
                 print(f"[LOSO {tgt:02d}] epoch {ep:03d}/{args.epochs}  ssl_loss={float(tf.reduce_mean(losses)): .4f}")
 
+            if args.probe_every > 0 and ep % args.probe_every == 0:
+                if args.probe_on == "target":
+                    acc_lr, acc_knn = _probe_now(encoder, X_tgt, y_tgt, args.probe_split, args.probe_k)
+                else:
+                    # quick probe on a labeled split from pooled sources (rarely used)
+                    # need y_src; reload with labels
+                    (X_src_l, y_src_l), _ = load_LOSO_pool(
+                        args.data_root, tgt, n_sub=args.n_sub, ea=args.ea, standardize=args.standardize,
+                        per_block_standardize=args.per_block_standardize, t1_sec=args.t1_sec, t2_sec=args.t2_sec
+                    )
+                    acc_lr, acc_knn = _probe_now(encoder, X_src_l, y_src_l, args.probe_split, args.probe_k)
+                print(f"   ↳ probe@{ep}: linear={acc_lr:.3f}  knn@{args.probe_k}={acc_knn:.3f}")
+
             if ep % args.save_every == 0 or ep == args.epochs:
                 wpath = os.path.join(fold_dir, f"ssl_encoder_sub{tgt}_epoch{ep}.weights.h5")
                 encoder.save_weights(wpath)
 
-def run_subject_dependent(args):
-    (X_tr, _), (X_te, _) = load_subject_dependent(
-        args.data_root, args.subject,
+def run_subject_dependent_one(args, sub: int):
+    (X_tr, y_tr), (X_te, y_te) = load_subject_dependent(
+        args.data_root, sub,
         ea=args.ea, standardize=args.standardize,
         t1_sec=args.t1_sec, t2_sec=args.t2_sec
     )
@@ -108,8 +138,11 @@ def run_subject_dependent(args):
         batch_size=args.batch_size, shuffle=True
     )
 
-    sub_dir = os.path.join(args.results_dir, f"SUBJ_{args.subject:02d}")
+    sub_dir = os.path.join(args.results_dir, f"SUBJ_{sub:02d}")
     os.makedirs(sub_dir, exist_ok=True)
+
+    ## vary seed per subject so runs aren’t identical across subs
+    # set_seed(args.seed + sub)
 
     encoder = build_encoder(args)
     ssl_model = build_ssl_projector(encoder, proj_dim=args.proj_dim, out_dim=args.out_dim)
@@ -122,14 +155,24 @@ def run_subject_dependent(args):
             v2 = tf.expand_dims(v2, 1)
             losses.append(train_step(ssl_model, v1, v2, opt, args.temperature))
         if ep % args.log_every == 0:
-            print(f"[SUBJ {args.subject:02d}] epoch {ep:03d}/{args.epochs}  ssl_loss={float(tf.reduce_mean(losses)): .4f}")
+            print(f"[SUBJ {sub:02d}] epoch {ep:03d}/{args.epochs}  ssl_loss={float(tf.reduce_mean(losses)): .4f}")
+
+        # Optional linear/kNN probe
+        if args.probe_every > 0 and ep % args.probe_every == 0:
+            Xp, yp = (X_te, y_te) if args.probe_on == "target" else (X_tr, y_tr)
+            acc_lr, acc_knn = _probe_now(encoder, Xp, yp, args.probe_split, args.probe_k)
+            print(f"   ↳ probe@{ep}: linear={acc_lr:.3f}  knn@{args.probe_k}={acc_knn:.3f}")
 
         if ep % args.save_every == 0 or ep == args.epochs:
-            wpath = os.path.join(sub_dir, f"ssl_encoder_sub{args.subject}_epoch{ep}.weights.h5")
+            wpath = os.path.join(sub_dir, f"ssl_encoder_sub{sub}_epoch{ep}.weights.h5")
             encoder.save_weights(wpath)
 
+def run_subject_dependent_all(args):
+    for sub in range(1, args.n_sub + 1):
+        run_subject_dependent_one(args, sub)
+
 def parse_args():
-    p = argparse.ArgumentParser("ATCNet SSL pretraining")
+    p = argparse.ArgumentParser("ATCNet SSL pretraining (+ optional linear/kNN probe)")
     # data
     p.add_argument("--data_root", type=str, required=True)
     p.add_argument("--results_dir", type=str, default="./results_ssl")
@@ -139,15 +182,9 @@ def parse_args():
     p.add_argument("--in_samples", type=int, default=1000)
     p.add_argument("--t1_sec", type=float, default=2.0)
     p.add_argument("--t2_sec", type=float, default=6.0)
-    p.add_argument("--ea", action="store_true")
-    p.add_argument("--no-ea", dest="ea", action="store_false")
-    p.set_defaults(ea=True)
-    p.add_argument("--standardize", action="store_true")
-    p.add_argument("--no-standardize", dest="standardize", action="store_false")
-    p.set_defaults(standardize=True)
-    p.add_argument("--per_block_standardize", action="store_true")
-    p.add_argument("--no-per_block_standardize", dest="per_block_standardize", action="store_false")
-    p.set_defaults(per_block_standardize=True)
+    p.add_argument("--ea", action="store_true"); p.add_argument("--no-ea", dest="ea", action="store_false"); p.set_defaults(ea=True)
+    p.add_argument("--standardize", action="store_true"); p.add_argument("--no-standardize", dest="standardize", action="store_false"); p.set_defaults(standardize=True)
+    p.add_argument("--per_block_standardize", action="store_true"); p.add_argument("--no-per_block_standardize", dest="per_block_standardize", action="store_false"); p.set_defaults(per_block_standardize=True)
 
     # model
     p.add_argument("--n_windows", type=int, default=5)
@@ -175,11 +212,18 @@ def parse_args():
 
     # mode
     p.add_argument("--loso", action="store_true")
-    p.add_argument("--subject", type=int, default=1)
+    p.add_argument("--subject", type=int, default=None,
+                   help="Subject ID for subject-dependent mode; omit to loop 1..n_sub")
 
     # projector
     p.add_argument("--proj_dim", type=int, default=128)
     p.add_argument("--out_dim", type=int, default=64)
+
+    # probes
+    p.add_argument("--probe_every", type=int, default=0, help="run linear/kNN probe every N epochs (0=off)")
+    p.add_argument("--probe_split", type=float, default=0.2, help="validation split for probe")
+    p.add_argument("--probe_k", type=int, default=5, help="k for k-NN probe")
+    p.add_argument("--probe_on", type=str, default="target", choices=["target","source"], help="which labeled set to probe on")
     return p.parse_args()
 
 def main():
@@ -190,7 +234,10 @@ def main():
     if args.loso:
         run_loso(args)
     else:
-        run_subject_dependent(args)
+        if args.subject is None:
+            run_subject_dependent_all(args)
+        else:
+            run_subject_dependent_one(args, args.subject)
 
 if __name__ == "__main__":
     main()
