@@ -21,7 +21,7 @@ except Exception:
 tf.config.threading.set_intra_op_parallelism_threads(1)
 tf.config.threading.set_inter_op_parallelism_threads(1)
 
-from src.datamodules.bci2a import load_LOSO_pool
+from src.datamodules.bci2a import load_LOSO_pool, load_subject_dependent
 from src.models.atcnet import build_atcnet
 
 def set_seed(seed: int = 1):
@@ -42,7 +42,6 @@ def _find_best_path(results_dir: str, subject: int) -> str:
                 p = os.path.join(results_dir, rel)
                 if os.path.exists(p):
                     return p
-    # fallback: pick latest from any run
     pattern = os.path.join(results_dir, "saved_models", "**", f"subject-{subject}.weights.h5")
     cands = sorted(glob.glob(pattern, recursive=True))
     return cands[-1] if cands else ""
@@ -81,12 +80,20 @@ def run(args):
     inf_ms = np.zeros(args.n_sub)
 
     for sub in range(1, args.n_sub + 1):
-        (X_src, _), (X_tgt, y_tgt) = load_LOSO_pool(
-            args.data_root, sub,
-            n_sub=args.n_sub, ea=args.ea, standardize=args.standardize,
-            per_block_standardize=args.per_block_standardize,
-            t1_sec=args.t1_sec, t2_sec=args.t2_sec
-        )
+        if args.loso:
+            (_, _), (X_tgt, y_tgt) = load_LOSO_pool(
+                args.data_root, sub,
+                n_sub=args.n_sub, ea=args.ea, standardize=args.standardize,
+                per_block_standardize=args.per_block_standardize,
+                t1_sec=args.t1_sec, t2_sec=args.t2_sec
+            )
+        else:
+            (_, _), (X_tgt, y_tgt) = load_subject_dependent(
+                args.data_root, sub,
+                ea=args.ea, standardize=args.standardize,
+                t1_sec=args.t1_sec, t2_sec=args.t2_sec
+            )
+
         X = _reshape_for_model(X_tgt)
         model = build_model(args)
         wpath = _find_best_path(args.results_dir, sub)
@@ -106,7 +113,7 @@ def run(args):
         kappa[sub - 1] = cohen_kappa_score(y_true, y_hat)
         cms[sub - 1] = confusion_matrix(y_true, y_hat, labels=np.arange(args.n_classes), normalize="true")
 
-        msg = f"Subject {sub:02d}: acc={acc[sub-1]:.4f}  kappa={kappa[sub-1]:.3f}  inf={dt:.2f} ms/trial"
+        msg = f"Subject {sub:02d} ({'LOSO' if args.loso else 'subject'}): acc={acc[sub-1]:.4f}  kappa={kappa[sub-1]:.3f}  inf={dt:.2f} ms/trial"
         print(msg); log.write(msg + "\n")
 
     hdr1 = "                  " + "".join([f"sub_{i:02d}   " for i in range(1, args.n_sub+1)]) + "  average"
@@ -121,20 +128,15 @@ def run(args):
 
     if args.plots:
         import matplotlib.pyplot as plt
-        # bar charts
-        fig, ax = plt.subplots(); ax.bar(range(1, args.n_sub+1), acc); ax.set_ylim(0,1); ax.set_title("Accuracy"); ax.set_xlabel("Subject")
-        plt.show()
-        fig, ax = plt.subplots(); ax.bar(range(1, args.n_sub+1), kappa); ax.set_ylim(0,1); ax.set_title("Kappa"); ax.set_xlabel("Subject")
-        plt.show()
-        # averaged confusion matrix
+        fig, ax = plt.subplots(); ax.bar(range(1, args.n_sub+1), acc); ax.set_ylim(0,1); ax.set_title("Accuracy"); ax.set_xlabel("Subject"); plt.show()
+        fig, ax = plt.subplots(); ax.bar(range(1, args.n_sub+1), kappa); ax.set_ylim(0,1); ax.set_title("Kappa"); ax.set_xlabel("Subject"); plt.show()
         cm_avg = cms.mean(0)
-        fig, ax = plt.subplots(); im = ax.imshow(cm_avg, interpolation="nearest"); ax.set_title("Confusion Matrix (avg)"); plt.colorbar(im)
-        ax.set_xlabel("Pred"); ax.set_ylabel("True"); plt.show()
+        fig, ax = plt.subplots(); im = ax.imshow(cm_avg, interpolation="nearest"); ax.set_title("Confusion Matrix (avg)"); plt.colorbar(im); ax.set_xlabel("Pred"); ax.set_ylabel("True"); plt.show()
 
     log.close()
 
 def parse_args():
-    p = argparse.ArgumentParser("ATCNet evaluation (test on LOSO targets)")
+    p = argparse.ArgumentParser("ATCNet evaluation")
     # data
     p.add_argument("--data_root", type=str, required=True)
     p.add_argument("--results_dir", type=str, default="./results")
@@ -147,6 +149,7 @@ def parse_args():
     p.add_argument("--ea", action="store_true"); p.add_argument("--no-ea", dest="ea", action="store_false"); p.set_defaults(ea=True)
     p.add_argument("--standardize", action="store_true"); p.add_argument("--no-standardize", dest="standardize", action="store_false"); p.set_defaults(standardize=True)
     p.add_argument("--per_block_standardize", action="store_true"); p.add_argument("--no-per_block_standardize", dest="per_block_standardize", action="store_false"); p.set_defaults(per_block_standardize=True)
+    p.add_argument("--loso", action="store_true"); p.add_argument("--no-loso", dest="loso", action="store_false"); p.set_defaults(loso=True)
 
     # model
     p.add_argument("--n_windows", type=int, default=5)

@@ -27,7 +27,7 @@ from tensorflow.keras.losses import CategoricalCrossentropy
 from tensorflow.keras.optimizers import Adam
 from tensorflow.keras.utils import to_categorical
 
-from src.datamodules.bci2a import load_LOSO_pool
+from src.datamodules.bci2a import load_LOSO_pool, load_subject_dependent
 from src.models.atcnet import build_atcnet
 
 def set_seed(seed: int = 1):
@@ -71,45 +71,53 @@ def build_model(args) -> tf.keras.Model:
         return_ssl_feat=False,
     )
 
-def run(args):
-    set_seed(args.seed)
-    if os.path.exists(args.results_dir) and args.clean:
-        import shutil
-        shutil.rmtree(args.results_dir)
-    os.makedirs(args.results_dir, exist_ok=True)
-
-    log_path = os.path.join(args.results_dir, "log.txt")
-    best_list_path = os.path.join(args.results_dir, "best_models.txt")
-    log = open(log_path, "w")
-    best_list = open(best_list_path, "w")
-
-    acc = np.zeros((args.n_sub, args.n_runs))
-    kappa = np.zeros((args.n_sub, args.n_runs))
-
-    t0_all = time.time()
-    for sub in range(1, args.n_sub + 1):
-        print(f"\nTraining on subject {sub}")
-        log.write(f"\nTraining on subject {sub}\n")
-
+def _load_train_val_for_subject(args, sub: int):
+    if args.loso:
         (X_src, y_src), _ = load_LOSO_pool(
             args.data_root, sub,
             n_sub=args.n_sub, ea=args.ea, standardize=args.standardize,
             per_block_standardize=args.per_block_standardize,
             t1_sec=args.t1_sec, t2_sec=args.t2_sec
         )
-
-        # train/val split on pooled sources
         y_oh = to_categorical(y_src, num_classes=args.n_classes)
         X_tr, X_va, y_tr, y_va = train_test_split(
-            X_src, y_oh, test_size=args.val_ratio, random_state=args.seed, stratify=y_oh.argmax(-1)
+            X_src, y_oh, test_size=args.val_ratio, random_state=args.seed,
+            stratify=y_oh.argmax(-1)
         )
-        X_tr = _reshape_for_model(X_tr)
-        X_va = _reshape_for_model(X_va)
+    else:
+        (X_tr_raw, y_tr), (X_te_raw, _) = load_subject_dependent(
+            args.data_root, sub,
+            ea=args.ea, standardize=args.standardize,
+            t1_sec=args.t1_sec, t2_sec=args.t2_sec
+        )
+        y_oh = to_categorical(y_tr, num_classes=args.n_classes)
+        X_tr, X_va, y_tr, y_va = train_test_split(
+            X_tr_raw, y_oh, test_size=args.val_ratio, random_state=args.seed,
+            stratify=y_oh.argmax(-1)
+        )
+    return _reshape_for_model(X_tr), _reshape_for_model(X_va), y_tr, y_va
 
-        best_acc = 0.0
-        best_hist = None
-        best_run_path = None
+def run(args):
+    set_seed(args.seed)
+    if os.path.exists(args.results_dir) and args.clean:
+        import shutil; shutil.rmtree(args.results_dir)
+    os.makedirs(args.results_dir, exist_ok=True)
 
+    log_path = os.path.join(args.results_dir, "log.txt")
+    best_list_path = os.path.join(args.results_dir, "best_models.txt")
+    log = open(log_path, "w"); best_list = open(best_list_path, "w")
+
+    acc = np.zeros((args.n_sub, args.n_runs))
+    kappa = np.zeros((args.n_sub, args.n_runs))
+
+    t0_all = time.time()
+    for sub in range(1, args.n_sub + 1):
+        print(f"\nTraining on subject {sub}  ({'LOSO' if args.loso else 'subject-dependent'})")
+        log.write(f"\nTraining on subject {sub}\n")
+
+        X_tr, X_va, y_tr, y_va = _load_train_val_for_subject(args, sub)
+
+        best_acc, best_hist, best_run_path = 0.0, None, None
         for run_idx in range(args.n_runs):
             tf.random.set_seed(args.seed + run_idx)
             np.random.seed(args.seed + run_idx)
@@ -117,7 +125,7 @@ def run(args):
             model = build_model(args)
             _maybe_load_ssl(model, args.ssl_weights, sub)
 
-            run_dir = os.path.join(args.results_dir, f"saved_models", f"run-{run_idx+1}")
+            run_dir = os.path.join(args.results_dir, "saved_models", f"run-{run_idx+1}")
             os.makedirs(run_dir, exist_ok=True)
             ckpt_path = os.path.join(run_dir, f"subject-{sub}.weights.h5")
 
@@ -159,9 +167,7 @@ def run(args):
             print(msg); log.write(msg + "\n")
 
             if acc[sub-1, run_idx] > best_acc:
-                best_acc = acc[sub-1, run_idx]
-                best_hist = hist
-                best_run_path = ckpt_path
+                best_acc = acc[sub-1, run_idx]; best_hist = hist; best_run_path = ckpt_path
 
         if best_run_path:
             rel = os.path.relpath(best_run_path, args.results_dir)
@@ -170,13 +176,10 @@ def run(args):
         if args.plot_curves and best_hist is not None:
             import matplotlib.pyplot as plt
             plt.plot(best_hist.history["accuracy"]); plt.plot(best_hist.history["val_accuracy"])
-            plt.title(f"Model accuracy - subject: {sub}"); plt.ylabel("Accuracy"); plt.xlabel("Epoch")
-            plt.legend(["Train", "Val"]); plt.show()
+            plt.title(f"Accuracy - subject {sub}"); plt.legend(["Train","Val"]); plt.show()
             plt.plot(best_hist.history["loss"]); plt.plot(best_hist.history["val_loss"])
-            plt.title(f"Model loss - subject: {sub}"); plt.ylabel("Loss"); plt.xlabel("Epoch")
-            plt.legend(["Train", "Val"]); plt.show(); plt.close()
+            plt.title(f"Loss - subject {sub}"); plt.legend(["Train","Val"]); plt.show(); plt.close()
 
-    # summary
     hdr1 = "         " + "".join([f"sub_{i:02d}   " for i in range(1, args.n_sub+1)]) + "  average"
     hdr2 = "         " + "".join(["------   " for _ in range(args.n_sub)]) + "  -------"
     info = "\n---------------------------------\nValidation performance (acc %):\n"
@@ -194,7 +197,7 @@ def run(args):
     best_list.close(); log.close()
 
 def parse_args():
-    p = argparse.ArgumentParser("ATCNet supervised finetuning (LOSO)")
+    p = argparse.ArgumentParser("ATCNet supervised finetuning")
     # data
     p.add_argument("--data_root", type=str, required=True)
     p.add_argument("--results_dir", type=str, default="./results")
@@ -208,6 +211,7 @@ def parse_args():
     p.add_argument("--standardize", action="store_true"); p.add_argument("--no-standardize", dest="standardize", action="store_false"); p.set_defaults(standardize=True)
     p.add_argument("--per_block_standardize", action="store_true"); p.add_argument("--no-per_block_standardize", dest="per_block_standardize", action="store_false"); p.set_defaults(per_block_standardize=True)
     p.add_argument("--val_ratio", type=float, default=0.2)
+    p.add_argument("--loso", action="store_true"); p.add_argument("--no-loso", dest="loso", action="store_false"); p.set_defaults(loso=True)
 
     # model
     p.add_argument("--n_windows", type=int, default=5)
@@ -239,7 +243,7 @@ def parse_args():
     p.add_argument("--plot_curves", action="store_true")
 
     # SSL init
-    p.add_argument("--ssl_weights", type=str, default="", help="Path or template to SSL weights; e.g., '/path/LOSO_{sub:02d}/ssl_encoder_sub{sub}_epoch100.weights.h5' or a directory containing them.")
+    p.add_argument("--ssl_weights", type=str, default="", help="Path/template to SSL weights, e.g., './results_ssl/LOSO_{sub:02d}/ssl_encoder_sub{sub}_epoch100.weights.h5' or './results_ssl_subj/SUBJ_{sub:02d}/ssl_encoder_sub{sub}_epoch100.weights.h5'")
     return p.parse_args()
 
 def main():
