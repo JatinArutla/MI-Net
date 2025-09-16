@@ -57,14 +57,17 @@ def build_encoder(args):
         return_ssl_feat=True,
     )
 
-@tf.function
-def train_step(ssl_model, v1, v2, optimizer, temperature: float):
+temperature = tf.constant(args.temperature, tf.float32)
+
+@tf.function(reduce_retracing=True)
+def train_step(v1, v2):
     with tf.GradientTape() as tape:
         z1 = ssl_model(v1, training=True)
         z2 = ssl_model(v2, training=True)
-        loss = nt_xent_loss(z1, z2, temperature=temperature)
+        loss = nt_xent_loss(z1, z2, temperature)
     grads = tape.gradient(loss, ssl_model.trainable_variables)
-    optimizer.apply_gradients(zip(grads, ssl_model.trainable_variables))
+    grads_vars = [(g, v) for g, v in zip(grads, ssl_model.trainable_variables) if g is not None]
+    opt.apply_gradients(grads_vars)
     return loss
 
 def _pack_X(X):  # [N,C,T] -> [N,1,C,T]
@@ -108,9 +111,7 @@ def run_loso(args):
         for ep in range(1, args.epochs + 1):
             losses = []
             for v1, v2 in ds:
-                v1 = _to_b1ct(v1)
-                v2 = _to_b1ct(v2)
-                losses.append(train_step(ssl_model, v1, v2, opt, args.temperature))
+                losses.append(train_step(_to_b1ct(v1), _to_b1ct(v2)))
             if ep % args.log_every == 0:
                 print(f"[LOSO {tgt:02d}] epoch {ep:03d}/{args.epochs}  ssl_loss={float(tf.reduce_mean(losses)): .4f}")
 
@@ -155,9 +156,7 @@ def run_subject_dependent_one(args, sub: int):
     for ep in range(1, args.epochs + 1):
         losses = []
         for v1, v2 in ds:
-            v1 = _to_b1ct(v1)
-            v2 = _to_b1ct(v2)
-            losses.append(train_step(ssl_model, v1, v2, opt, args.temperature))
+            losses.append(train_step(_to_b1ct(v1), _to_b1ct(v2)))
         if ep % args.log_every == 0:
             print(f"[SUBJ {sub:02d}] epoch {ep:03d}/{args.epochs}  ssl_loss={float(tf.reduce_mean(losses)): .4f}")
 
