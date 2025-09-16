@@ -23,8 +23,8 @@ tf.config.threading.set_inter_op_parallelism_threads(1)
 from src.datamodules.bci2a import load_LOSO_pool, load_subject_dependent
 from src.models.atcnet import build_atcnet
 from src.models.wrappers import build_ssl_projector
-from src.ssl.views import make_ssl_dataset
-from src.ssl.losses import nt_xent_loss
+from src.selfsupervised.views import make_ssl_dataset
+from src.selfsupervised.losses import nt_xent_loss
 
 def set_seed(seed: int = 1):
     import random
