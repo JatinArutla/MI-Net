@@ -1,4 +1,9 @@
-import os, argparse, math, time
+# train_ssl.py
+# Self-supervised pretraining for ATCNet on BCI IV-2a
+# - Supports LOSO and subject-dependent (single subject or loop all)
+# - Optional linear / k-NN probes during training
+
+import os, argparse
 os.environ["TF_DISABLE_LAYOUT_OPTIMIZER"] = "1"
 os.environ["TF_DETERMINISTIC_OPS"] = "1"
 os.environ["TF_CUDNN_DETERMINISTIC"] = "1"
@@ -31,6 +36,9 @@ from src.models.wrappers import build_ssl_projector
 from src.selfsupervised.views import make_ssl_dataset
 from src.selfsupervised.losses import nt_xent_loss
 
+
+# ----------------- Utils -----------------
+
 def set_seed(seed: int = 1):
     import random
     random.seed(seed); np.random.seed(seed); tf.random.set_seed(seed)
@@ -54,30 +62,18 @@ def build_encoder(args):
         tcn_activation=args.tcn_activation,
         fuse=args.fuse,
         from_logits=False,
-        return_ssl_feat=True,
+        return_ssl_feat=True,  # exposes averaged per-window feature as second output
     )
 
-temperature = tf.constant(args.temperature, tf.float32)
-
-@tf.function(reduce_retracing=True)
-def train_step(v1, v2):
-    with tf.GradientTape() as tape:
-        z1 = ssl_model(v1, training=True)
-        z2 = ssl_model(v2, training=True)
-        loss = nt_xent_loss(z1, z2, temperature)
-    grads = tape.gradient(loss, ssl_model.trainable_variables)
-    grads_vars = [(g, v) for g, v in zip(grads, ssl_model.trainable_variables) if g is not None]
-    opt.apply_gradients(grads_vars)
-    return loss
-
 def _pack_X(X):  # [N,C,T] -> [N,1,C,T]
-    return X[:, None, ...].astype(np.float32, copy=False)
+    X = X.astype(np.float32, copy=False)
+    return X if X.ndim == 4 else X[:, None, ...]
 
 def _to_b1ct(x):
-    # if dataset yields [B, C, T] → make [B, 1, C, T]; if already [B, 1, C, T] → pass through
+    # If dataset yields [B,C,T] → make [B,1,C,T]; if already [B,1,C,T] → pass-through
     return x if x.shape.rank == 4 else tf.expand_dims(x, 1)
 
-def _probe_now(encoder, X, y, split, k):
+def _probe_now(encoder, X, y, split: float, k: int):
     feat_model = tf.keras.Model(encoder.input, encoder.outputs[1], name="feature_tap")
     Z = feat_model(_pack_X(X), training=False).numpy()
     Ztr, Zva, ytr, yva = train_test_split(Z, y, test_size=split, random_state=42, stratify=y)
@@ -87,12 +83,15 @@ def _probe_now(encoder, X, y, split, k):
     acc_knn = accuracy_score(yva, knn.predict(Zva))
     return acc_lr, acc_knn
 
+
+# ----------------- Runners -----------------
+
 def run_loso(args):
     for tgt in range(1, args.n_sub + 1):
         fold_dir = os.path.join(args.results_dir, f"LOSO_{tgt:02d}")
         os.makedirs(fold_dir, exist_ok=True)
 
-        (X_src, _), (X_tgt, y_tgt) = load_LOSO_pool(
+        (X_src, y_src), (X_tgt, y_tgt) = load_LOSO_pool(
             args.data_root, tgt,
             n_sub=args.n_sub, ea=args.ea, standardize=args.standardize,
             per_block_standardize=args.per_block_standardize,
@@ -107,6 +106,22 @@ def run_loso(args):
         encoder = build_encoder(args)
         ssl_model = build_ssl_projector(encoder, proj_dim=args.proj_dim, out_dim=args.out_dim)
         opt = tf.keras.optimizers.Adam(args.lr)
+        temperature = tf.constant(args.temperature, tf.float32)
+
+        @tf.function(reduce_retracing=True)  # comment out to run eagerly
+        def train_step(v1, v2):
+            with tf.GradientTape() as tape:
+                z1 = ssl_model(v1, training=True)
+                z2 = ssl_model(v2, training=True)
+                loss = nt_xent_loss(z1, z2, temperature)
+            grads = tape.gradient(loss, ssl_model.trainable_variables)
+            grads_vars = [(g, v) for g, v in zip(grads, ssl_model.trainable_variables) if g is not None]
+            opt.apply_gradients(grads_vars)
+            return loss
+
+        # warm-up call to build variables once
+        warm = next(iter(ds))
+        _ = train_step(_to_b1ct(warm[0]), _to_b1ct(warm[1]))
 
         for ep in range(1, args.epochs + 1):
             losses = []
@@ -119,18 +134,13 @@ def run_loso(args):
                 if args.probe_on == "target":
                     acc_lr, acc_knn = _probe_now(encoder, X_tgt, y_tgt, args.probe_split, args.probe_k)
                 else:
-                    # quick probe on a labeled split from pooled sources (rarely used)
-                    # need y_src; reload with labels
-                    (X_src_l, y_src_l), _ = load_LOSO_pool(
-                        args.data_root, tgt, n_sub=args.n_sub, ea=args.ea, standardize=args.standardize,
-                        per_block_standardize=args.per_block_standardize, t1_sec=args.t1_sec, t2_sec=args.t2_sec
-                    )
-                    acc_lr, acc_knn = _probe_now(encoder, X_src_l, y_src_l, args.probe_split, args.probe_k)
+                    acc_lr, acc_knn = _probe_now(encoder, X_src, y_src, args.probe_split, args.probe_k)
                 print(f"   ↳ probe@{ep}: linear={acc_lr:.3f}  knn@{args.probe_k}={acc_knn:.3f}")
 
             if ep % args.save_every == 0 or ep == args.epochs:
                 wpath = os.path.join(fold_dir, f"ssl_encoder_sub{tgt}_epoch{ep}.weights.h5")
                 encoder.save_weights(wpath)
+
 
 def run_subject_dependent_one(args, sub: int):
     (X_tr, y_tr), (X_te, y_te) = load_subject_dependent(
@@ -146,12 +156,24 @@ def run_subject_dependent_one(args, sub: int):
     sub_dir = os.path.join(args.results_dir, f"SUBJ_{sub:02d}")
     os.makedirs(sub_dir, exist_ok=True)
 
-    ## vary seed per subject so runs aren’t identical across subs
-    # set_seed(args.seed + sub)
-
     encoder = build_encoder(args)
     ssl_model = build_ssl_projector(encoder, proj_dim=args.proj_dim, out_dim=args.out_dim)
     opt = tf.keras.optimizers.Adam(args.lr)
+    temperature = tf.constant(args.temperature, tf.float32)
+
+    @tf.function(reduce_retracing=True)
+    def train_step(v1, v2):
+        with tf.GradientTape() as tape:
+            z1 = ssl_model(v1, training=True)
+            z2 = ssl_model(v2, training=True)
+            loss = nt_xent_loss(z1, z2, temperature)
+        grads = tape.gradient(loss, ssl_model.trainable_variables)
+        grads_vars = [(g, v) for g, v in zip(grads, ssl_model.trainable_variables) if g is not None]
+        opt.apply_gradients(grads_vars)
+        return loss
+
+    warm = next(iter(ds))
+    _ = train_step(_to_b1ct(warm[0]), _to_b1ct(warm[1]))
 
     for ep in range(1, args.epochs + 1):
         losses = []
@@ -160,7 +182,6 @@ def run_subject_dependent_one(args, sub: int):
         if ep % args.log_every == 0:
             print(f"[SUBJ {sub:02d}] epoch {ep:03d}/{args.epochs}  ssl_loss={float(tf.reduce_mean(losses)): .4f}")
 
-        # Optional linear/kNN probe
         if args.probe_every > 0 and ep % args.probe_every == 0:
             Xp, yp = (X_te, y_te) if args.probe_on == "target" else (X_tr, y_tr)
             acc_lr, acc_knn = _probe_now(encoder, Xp, yp, args.probe_split, args.probe_k)
@@ -170,9 +191,13 @@ def run_subject_dependent_one(args, sub: int):
             wpath = os.path.join(sub_dir, f"ssl_encoder_sub{sub}_epoch{ep}.weights.h5")
             encoder.save_weights(wpath)
 
+
 def run_subject_dependent_all(args):
     for sub in range(1, args.n_sub + 1):
         run_subject_dependent_one(args, sub)
+
+
+# ----------------- CLI -----------------
 
 def parse_args():
     p = argparse.ArgumentParser("ATCNet SSL pretraining (+ optional linear/kNN probe)")
@@ -229,6 +254,7 @@ def parse_args():
     p.add_argument("--probe_on", type=str, default="target", choices=["target","source"], help="which labeled set to probe on")
     return p.parse_args()
 
+
 def main():
     args = parse_args()
     os.makedirs(args.results_dir, exist_ok=True)
@@ -241,6 +267,7 @@ def main():
             run_subject_dependent_all(args)
         else:
             run_subject_dependent_one(args, args.subject)
+
 
 if __name__ == "__main__":
     main()
