@@ -28,7 +28,7 @@ from tensorflow.keras.optimizers import Adam
 from tensorflow.keras.utils import to_categorical
 
 from src.datamodules.bci2a import load_LOSO_pool, load_subject_dependent
-from src.models.atcnet import build_atcnet
+from src.models.model import build_atcnet
 
 def set_seed(seed: int = 1):
     import random
