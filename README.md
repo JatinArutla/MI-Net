@@ -73,7 +73,7 @@ sys.path.insert(0, os.path.abspath("src"))
 
 ## Usage
 
-### Self-supervised pretraining (`train_ssl.py`)
+### Self-supervised pretraining (train_ssl.py)
 
 **1) LOSO (loop over targets 1..9)**  
 [Trains on pooled sources for each target; saves per-fold encoder weights.]
