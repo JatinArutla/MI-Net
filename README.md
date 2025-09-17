@@ -76,11 +76,57 @@ sys.path.insert(0, os.path.abspath("src"))
 ### Self-supervised pretraining (`train_ssl.py`)
 
 **1) LOSO (loop over targets 1..9)**  
-Trains on pooled sources for each target; saves per-fold encoder weights.
-```bash
+[Trains on pooled sources for each target; saves per-fold encoder weights.]
 python train_ssl.py \
   --data_root "/kaggle/input/four-class-motor-imagery-bnci-001-2014" \
   --results_dir ./results_ssl \
   --loso \
   --epochs 100 --batch_size 256 --lr 1e-3 \
   --probe_every 25 --probe_on target
+
+**2) Subject-dependent (loop over all subjects)
+[Omit --subject to train SSL for subjects 1..9.]
+python train_ssl.py \
+  --data_root "/kaggle/input/four-class-motor-imagery-bnci-001-2014" \
+  --results_dir ./results_ssl_subj \
+  --no-loso \
+  --epochs 100 --batch_size 256 --lr 1e-3
+
+### Supervised finetuning (finetune.py)
+
+Common flags
+--loso (default on): pooled sources → train/val split
+--no-loso: subject-dependent (A0sT) → train/val split
+--ssl_weights: optional path template to warm-start from SSL encoder weights
+LOSO: ./results_ssl/LOSO_{sub:02d}/ssl_encoder_sub{sub}_epoch100.weights.h5
+Subject-dependent: ./results_ssl_subj/SUBJ_{sub:02d}/ssl_encoder_sub{sub}_epoch100.weights.h5
+
+**1) LOSO supervised (from scratch)
+python finetune.py \
+  --data_root "/kaggle/input/four-class-motor-imagery-bnci-001-2014" \
+  --results_dir ./results_sup_loso \
+  --loso \
+  --epochs 500 --batch_size 64 --lr 1e-3
+
+**2)LOSO supervised with SSL weights
+python finetune.py \
+  --data_root "/kaggle/input/four-class-motor-imagery-bnci-001-2014" \
+  --results_dir ./results_sup_loso_ssl \
+  --loso \
+  --ssl_weights "./results_ssl/LOSO_{sub:02d}/ssl_encoder_sub{sub}_epoch100.weights.h5" \
+  --epochs 500 --batch_size 64 --lr 1e-3
+
+**3)Subject-dependent supervised (loop all subjects)
+python finetune.py \
+  --data_root "/kaggle/input/four-class-motor-imagery-bnci-001-2014" \
+  --results_dir ./results_sup_subj \
+  --no-loso \
+  --epochs 500 --batch_size 64 --lr 1e-3
+
+**4)Subject-dependent supervised with SSL weights
+python finetune.py \
+  --data_root "/kaggle/input/four-class-motor-imagery-bnci-001-2014" \
+  --results_dir ./results_sup_subj_ssl \
+  --no-loso \
+  --ssl_weights "./results_ssl_subj/SUBJ_{sub:02d}/ssl_encoder_sub{sub}_epoch100.weights.h5" \
+  --epochs 500 --batch_size 64 --lr 1e-3
